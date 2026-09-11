@@ -27,9 +27,8 @@ set.seed(1389)
 # load data
 cand_songs <- read_csv("data/cand_songs_bycampaign.csv") |> 
   mutate(cand_year = fct_reorder(cand_year, year)) |>
-  mutate(across(starts_with("NRC_"), ~ 100 * .x / WC), 
-         across(starts_with("avg_"), ~ 100 * .x / WC),
-         i_less_we = i-we, fem_male = female-male)  #deal with NRC wordcount issues for scaling
+  mutate(across(starts_with("NRC_"), ~ 100 * .x / WC), #deal with NRC wordcount issues for scaling
+         i_less_we = i-we, fem_male = female-male)  
 
 #### label prep #####
 front = c( "Clinton 2016", "Biden 2020",
