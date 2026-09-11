@@ -1,0 +1,309 @@
+## run after initial results (does not run on own!)
+
+
+ylabdim <- c("Dim 2: Time, future to joyful, male, trust ")
+xlabdim <- c("Dim 1: Gender (female/care to male/conflict" )
+
+
+fviz_pca_var(
+  pca_res, 
+  col.var = "contrib", 
+  axes = c(3, 2), 
+  labelsize = 6,                 # larger variable labels
+  repel = TRUE,
+  gradient.cols = c("gray75", "black"),
+  ylab = ylabdim,    
+  xlab = xlabdim) #+
+
+
+#descriptive table
+num_data |> select(-id) |> describe() |> as.data.frame() |>
+  rownames_to_column(var = "Variable") |> 
+  mutate(Variable = coalesce(var_labels[Variable], Variable)) |>
+  select(Variable, min, median, max, n) |>
+  xtable() |> print("img/pca_var.tex", type = "latex", include.rownames = FALSE, floating = FALSE )
+
+
+## Now: PCA and focus on grouping by candidate. #########
+# now filter for regular analysis: add relevant elements back in
+pca_out <- cand_songs |> 
+  select(id, campaign, cand_full, party, genre, title) |>
+  inner_join(as.data.frame(pca_res_id), by = "id") |> group_by(party, title) |> 
+  mutate(num_party_plays = n()) |> ungroup() 
+
+### CAND LANDSCAPE ##
+cand_avg <- pca_out |>
+  group_by(campaign, cand_full, party) |>
+  summarise(cand_avg_3 = mean(PC3), cand_avg_2 = mean(PC2), .groups = "drop") |>
+  group_by(party) |>
+  mutate(party_avg_3 = mean(cand_avg_3), party_avg_2 = mean(cand_avg_2)) |> 
+  mutate(cand_year = paste(word(cand_full, -1), str_extract(campaign, "\\d{4}"))) |> ungroup()
+
+# Plot only the candidate group labels #
+cand_avg |> 
+  ggplot() +
+  geom_label_repel(aes(x = cand_avg_3, y = cand_avg_2, 
+                       label = cand_year, color = party, fill = party), force = 0.05,      
+                   force_pull = 3, size = 4.5) +
+  geom_label(aes(x = party_avg_3, y = party_avg_2, label = party, color = party), size = 5) + 
+  labs(  y = ylabdim,    
+         x = xlabdim,
+         title = "Candidate Averages (PCA)") + #facet_grid(vars(party)) +
+  scale_color_manual(values = party_colors) +
+  scale_fill_manual(values = c(  "R" = "lightpink", "D" = "lightblue" ))  
+# ggsave(filename = "img/pca_cand.png", width = 9, height = 7)
+
+
+## PCA BOOTSTRAPPING
+## 
+## Are campaign centroids stable, or are they noise at high resolution?
+## Resample songs WITHIN each campaign, recompute the centroid, repeat.
+## 
+B <- 500
+
+pca_out <- pca_out |>  
+  mutate(cand_year = paste(word(cand_full, -1), str_extract(campaign, "\\d{4}")))
+
+## observed centroids
+cent <- pca_out |>
+  group_by(cand_year, party) |>
+  summarise(n_songs = n(), c1 = mean(PC3), c2 = mean(PC2), .groups = "drop")
+
+## bootstrap
+boot <- map_dfr(seq_len(B), function(b) {
+  pca_out |>
+    group_by(cand_year) |>
+    slice_sample(prop = 1, replace = TRUE) |>
+    summarise(m1 = mean(PC3), m2 = mean(PC2), .groups = "drop")
+})
+
+stab <- boot |>
+  group_by(cand_year) |>
+  summarise(se1 = sd(m1), se2 = sd(m2),
+            lo1 = quantile(m1, .025), hi1 = quantile(m1, .975),
+            lo2 = quantile(m2, .025), hi2 = quantile(m2, .975),
+            .groups = "drop") |>
+  left_join(cent, by = "cand_year")
+
+## 
+## The decision numbers
+## 
+between1 <- sd(cent$c1)
+between2 <- sd(cent$c2)
+
+stab  |>
+  mutate(ratio1 = se1 / between1, ratio2 = se2 / between2) |>
+  select(cand_year, party, n_songs, se1, se2, ratio1, ratio2) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  arrange(desc(ratio1)) |> print(n = Inf)
+
+cat("\nbetween-campaign SD:  PC3 =", round(between1, 3),
+    " PC2 =", round(between2, 3), "\n")
+cat("median noise/signal:  PC3 =", round(median(stab$se1) / between1, 2),
+    " PC2 =", round(median(stab$se2) / between2, 2), "\n")
+
+## Independent check: how much of song-level variance does campaign explain?
+for (k in c("PC3", "PC2")) {
+  a  <- anova(lm(reformulate("cand_year", k), data = pca_out))
+  cat(k, " eta^2 =", round(a$`Sum Sq`[1] / sum(a$`Sum Sq`), 3),
+      "  p =", format.pval(a$`Pr(>F)`[1], digits = 3), "\n")
+}
+
+
+keep_c <- stab |> pull(cand_year)
+dat    <- pca_out |> filter(cand_year %in% keep_c)
+camps  <- dat |> distinct(cand_year, party)
+by_camp <- split(dat, dat$cand_year)
+
+cat("campaigns kept:", nrow(camps), "\n")
+#print(count(camps, party))
+
+## observed party centroid = mean of campaign means
+party_cent <- dat |>
+  group_by(party, cand_year) |>
+  summarise(m1 = mean(PC3), m2 = mean(PC2), .groups = "drop_last") |>
+  summarise(n_camp = n(), c1 = mean(m1), c2 = mean(m2), .groups = "drop")
+
+## nested bootstrap: campaigns within party, then songs within campaign
+party_boot <- map_dfr(seq_len(B), function(b) {
+  map_dfr(unique(camps$party), function(pp) {
+    cs <- sample(camps$cand_year[camps$party == pp], replace = TRUE)
+    mm <- vapply(cs, function(cc) {
+      s <- by_camp[[cc]]
+      i <- sample.int(nrow(s), nrow(s), replace = TRUE)
+      c(mean(s$PC3[i]), mean(s$PC2[i]))
+    }, numeric(2))
+    tibble(party = pp, p1 = mean(mm[1, ]), p2 = mean(mm[2, ]))
+  })
+})
+
+party_stab <- party_boot |>
+  group_by(party) |>
+  summarise(lo1 = quantile(p1, .025), hi1 = quantile(p1, .975),
+            lo2 = quantile(p2, .025), hi2 = quantile(p2, .975),
+            .groups = "drop") |>
+  left_join(party_cent, by = "party") |>
+  mutate(lab = paste0(party, " (", n_camp, " campaigns)"))
+
+print(party_stab)
+
+var_explained <- function(pc, data, group = "cand_year") {
+  a  <- anova(lm(reformulate(group, pc), data = data))
+  ss <- a$`Sum Sq`; ms_e <- a$`Mean Sq`[2]
+  tibble(
+    pc    = pc,
+    eta2  = ss[1] / sum(ss),
+    omega2 = (ss[1] - a$Df[1] * ms_e) / (sum(ss) + ms_e),
+    p     = a$`Pr(>F)`[1] )
+}
+
+ve <- map_dfr(c("PC3", "PC2"), var_explained, data = dat, group = "cand_year") # dat == plotted data
+
+pct <- function(x) paste0(formatC(100 * x, format = "f", digits = 1), "%")
+
+cap <- paste0(
+  "Campaigns with more than five songs. Small points are campaign means ",
+  "(crossbars: 95% bootstrap CI over songs).\n",
+  "Diamonds are party means of campaign means (crossbars: nested bootstrap over ",
+  "campaigns and songs).\n",
+  "Candidate accounts for ", pct(ve$eta2[1]), " and ", pct(ve$eta2[2]),
+  " of song-level variance in PC3 and PC2 (p = ",
+  format.pval(ve$p[1], digits = 2), ", p = ", format.pval(ve$p[2], digits = 2),
+  ").")
+
+## making the boostrap plot ####
+ggplot(stab, aes(c1, c2, colour = party)) +
+  geom_vline(xintercept = 0, colour = "grey88") +
+  geom_hline(yintercept = 0, colour = "grey88") +
+  
+  # campaigns: thin crossbars, small points
+  geom_segment(aes(x = lo1, xend = hi1, y = c2, yend = c2), alpha = 0.30) +
+  geom_segment(aes(x = c1, xend = c1, y = lo2, yend = hi2), alpha = 0.30) +
+  geom_point(size = 1.9) +
+  ggrepel::geom_text_repel(aes(label = cand_year), size = 4.5, seed = 13,
+                           min.segment.length = 0.2, box.padding = 0.35) +
+  # parties: heavy crossbars, diamond
+  geom_segment(data = party_stab, linewidth = 1.1,
+               aes(x = lo1, xend = hi1, y = c2, yend = c2)) +
+  geom_segment(data = party_stab, linewidth = 1.1,
+               aes(x = c1, xend = c1, y = lo2, yend = hi2)) +
+  geom_point(data = party_stab, aes(c1, c2), shape = 18, size = 6) +
+  geom_text(data = party_stab, aes(c1, c2, label = lab),
+            vjust = -1.4, fontface = "bold", size = 5.5, show.legend = FALSE) +
+  
+  scale_colour_manual(values = party_colors, name = "Party") +
+  labs(y = ylabdim, x = xlabdim,
+       title = "Campaign and party centroids with bootstrap uncertainty",
+       caption = cap) + coord_cartesian(ylim = c(-1.1, 1.7), xlim = c(-1.5, 1.55)) +
+  theme(plot.caption = element_text(hjust = 0, colour = "grey30", size = 10), legend.position = "bottom")
+
+ggsave(path = "img/", "pca_cand_boot_dim2_dim3.png", width = 12, height = 10, dpi = 300)
+
+## does the campaign-level t-test agree?
+cm <- pca_out |> group_by(cand_year, party) |>
+  summarise(m = mean(PC2), .groups = "drop")
+t.test(m ~ party, data = cm)
+
+stab |>
+  print(file = "img/summary_pca_stab.tex", type = "latex",  include.rownames = FALSE, floating = FALSE )
+
+
+# ####### testing PCA vs genre
+library(lmerTest)
+stab <- stab |>
+  mutate(cand = sub("\\d{4}$", "", cand_year))
+
+# baseline: campaign PC2 by party, Trump's campaigns sharing an intercept
+summary(lmer(c2 ~ party + (1 | cand), data = stab))
+
+# song level, genre controlled (lump rare genres so the model is estimable)
+song_g <- dat |> mutate(genre = fct_lump_min(factor(genre), min = 10))
+
+m_base  <- lmer(PC2 ~ party         + (1 | cand_year), data = song_g)
+m_genre <- lmer(PC2 ~ party + genre + (1 | cand_year), data = song_g)
+
+summary(m_base)
+summary(m_genre)
+
+# does party's effect survive once genre is in the model, and does genre
+# improve fit at all?
+anova(m_base, m_genre)
+
+count(song_g, genre)          # confirm reference level and what fell into "Other"
+levels(song_g$genre)[1]
+
+## fixed-effects comparison: does the party effect survive adding genre? ##
+fixed_tbl <- function(m, suffix) {
+  co <- summary(m)$coefficients
+  tibble(
+    term = rownames(co),
+    est  = co[, "Estimate"],
+    se   = co[, "Std. Error"],
+    p    = co[, "Pr(>|t|)"]
+  ) |>
+    rename_with(~ paste0(.x, "_", suffix), c(est, se, p))
+}
+
+genre_table <- full_join(
+  fixed_tbl(m_base,  "base"),
+  fixed_tbl(m_genre, "genre"),
+  by = "term"
+) |>
+  mutate(term = recode(term,
+                       "(Intercept)"   = "Intercept",
+                       "partyR"        = "Party (R)",
+                       "genrepop/rock" = "Genre: Pop/Rock",
+                       "genrer&b"      = "Genre: R&B",
+                       "genreOther"    = "Genre: Other"
+  )) |>
+  rename(
+    Term              = term,
+    `Est. (no genre)` = est_base,
+    `SE (no genre)`   = se_base,
+    `p (no genre)`    = p_base,
+    `Est. (+ genre)`  = est_genre,
+    `SE (+ genre)`    = se_genre,
+    `p (+ genre)`     = p_genre
+  )
+
+genre_table |>
+  xtable(digits = c(0, 0, 3, 3, 3, 3, 3, 3)) |>
+  print(file = "img/summary_pca_genre.tex", type = "latex",
+        include.rownames = FALSE, floating = FALSE)
+
+## model comparison: does genre improve fit at all? ##
+comp_tbl <- anova(m_base, m_genre) |>
+  as.data.frame() |>
+  mutate(Model = c("Party only", "Party + genre"), .before = 1) |>
+  select(Model, npar, AIC, BIC, Chisq, Df, p = `Pr(>Chisq)`)
+
+comp_tbl |>
+  xtable(digits = c(0, 0, 0, 1, 1, 2, 0, 3)) |>
+  print(file = "img/summary_pca_genre_lrt.tex", type = "latex",
+        include.rownames = FALSE, floating = FALSE)
+
+
+
+# ## leave one campaign out
+loo_table <- function(pc) {
+  map_dfr(unique(pca_out$cand_year), function(cc) {
+    f <- reformulate(c("party", "(1 | cand_year)"), response = pc)
+    m <- lmer(f, data = filter(pca_out, cand_year != cc))
+    s <- summary(m)$coefficients["partyR", ]
+    tibble(cand_year = cc, est = s[["Estimate"]], p = s[["Pr(>|t|)"]])
+  })
+}
+
+loo_PC3 <- loo_table("PC3") |> rename(PC3_est = est, PC3_p = p)
+loo_pc2 <- loo_table("PC2") |> rename(pc2_est = est, pc2_p = p)
+
+loo_combined <- full_join(loo_PC3, loo_pc2, by = "cand_year") |>
+  arrange(pc2_p) |>
+  rename(
+    `Campaign Dropped` = cand_year,
+    `Dim 1 Est.`  = PC3_est,
+    `Dim 1 p`     = PC3_p,
+    `Dim 2 Est.`  = pc2_est,
+    `Dim 2 p`     = pc2_p )
+
+loo_combined 
