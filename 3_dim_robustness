@@ -1,8 +1,5 @@
-## run after initial results (does not run on own!)
-
-
 ylabdim <- c("Dim 2: Time, future to joyful, male, trust ")
-xlabdim <- c("Dim 1: Gender (female/care to male/conflict" )
+xlabdim <- c("dim 3: Gender (female/care to male/conflict" )
 
 
 fviz_pca_var(
@@ -301,9 +298,12 @@ loo_combined <- full_join(loo_PC3, loo_pc2, by = "cand_year") |>
   arrange(pc2_p) |>
   rename(
     `Campaign Dropped` = cand_year,
-    `Dim 1 Est.`  = PC3_est,
-    `Dim 1 p`     = PC3_p,
+    `Dim 3 Est.`  = PC3_est,
+    `Dim 3 p`     = PC3_p,
     `Dim 2 Est.`  = pc2_est,
     `Dim 2 p`     = pc2_p )
 
-loo_combined 
+loo_combined |>
+  xtable(digits = c(0, 0, 3, 3, 3, 3)) |>
+  print(file = "img/summary_loo_pc.tex", type = "latex",
+        include.rownames = FALSE, floating = FALSE)
