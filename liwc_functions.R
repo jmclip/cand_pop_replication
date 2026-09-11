@@ -121,7 +121,7 @@ liwc_by_party <- function(data, liwc_vars, conf = 0.95,
       
       lo    = if_else(has_neg, mean - tcrit * se, pmax(0, mean - tcrit * se)),
       hi    = mean + tcrit * se,
-      x_lab = paste0(party, "\n(", n_songs, " songs, ", n_camps, " campaigns)")
+      x_lab = paste0(party, "\n(", n_songs, " songs,\n", n_camps, " campaigns)")
     )
 }
 
@@ -203,14 +203,19 @@ liwc_by_cand <- function(data, liwc_vars, conf = 0.95) {
     ungroup()
 }
 
-# Plot party comparisons
 # Plot party comparisons with in-bar estimates and SEs
 plot_party <- function(data, liwc_vars,
                        unit = c("song", "campaign", "candidate"),
                        title = "LIWC by party", filename = NULL,
-                       use_adj = TRUE, w = 7, h = 5) {
+                       use_adj = TRUE, var_labels = NULL, w = 9, h = 6) {
+  
+  # Safe lookup for global var_labels if not passed directly
+  if (is.null(var_labels)) {
+    var_labels <- get0("var_labels", envir = .GlobalEnv)
+  }
+  
   unit <- match.arg(unit)
-  d   <- liwc_by_party(data, liwc_vars, unit = unit)
+  d    <- liwc_by_party(data, liwc_vars, unit = unit)
   tst <- liwc_party_test(data, liwc_vars, unit = unit)
   star_col <- if (use_adj) "sig_adj" else "sig"
   neg      <- any(d$mean < 0, na.rm = TRUE)
@@ -220,10 +225,9 @@ plot_party <- function(data, liwc_vars,
     mutate(
       bar_label = if_else(
         !is.na(mean) & !is.na(se),
-        sprintf("%.2f\n(%.2f)", mean, se),
+        sprintf("%.3f\n(%.2f)", mean, se),
         sprintf("%.2f", mean)
       ),
-      # Position label at 25% height of the bar for center alignment
       label_y = mean * 0.25
     )
   
@@ -251,7 +255,6 @@ plot_party <- function(data, liwc_vars,
     (if (neg) geom_hline(yintercept = 0, colour = "grey50", linewidth = 0.6) else NULL) +
     geom_col(width = 0.7, colour = NA) +
     geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.18, linewidth = 0.9, colour = "grey40") +
-    # White text inside the bars (centered at 50% bar height)
     geom_text(
       aes(y = label_y, label = bar_label),
       colour = "white",
@@ -262,7 +265,8 @@ plot_party <- function(data, liwc_vars,
     ) +
     geom_text(data = ann, aes(x = x, y = y, label = sig_use),
               inherit.aes = FALSE, size = 8, vjust = 0) +
-    facet_wrap(~ liwc, scales = "free_y") +
+    facet_wrap(~ liwc, scales = "free_y", 
+               labeller = labeller(liwc = if (!is.null(var_labels)) var_labels else identity)) +
     scale_fill_manual(values = party_colors, guide = "none") +
     scale_y_continuous(expand = expansion(mult = if (neg) c(0.15, 0.22) else c(0, 0.22))) +
     labs(x = NULL, y = "Mean % of words per song", title = title,
@@ -281,8 +285,14 @@ plot_party <- function(data, liwc_vars,
 
 # Plot individual campaigns against the corpus mean, BH-adjusted stars
 plot_cand_single <- function(data, liwc_vars, title_prefix = "LIWC",
-                             filename_prefix = NULL, only_front = FALSE,
-                             w = 9, h = 7) {
+                             filename_prefix = NULL, only_front = TRUE,
+                             var_labels = NULL, w = 7, h = 5) {
+  
+  # Safe lookup for global var_labels if not passed directly
+  if (is.null(var_labels)) {
+    var_labels <- get0("var_labels", envir = .GlobalEnv)
+  }
+  
   plots <- list()
   for (var in liwc_vars) {
     d <- liwc_by_cand(data, var)
@@ -291,7 +301,10 @@ plot_cand_single <- function(data, liwc_vars, title_prefix = "LIWC",
       warning("no rows for ", var, " after filtering; skipped")
       next
     }
-    var_title    <- paste0(title_prefix, ": ", var)
+    # Get clean label for plot title if provided
+    clean_label <- if (!is.null(var_labels) && var %in% names(var_labels)) var_labels[[var]] else var
+    var_title   <- paste0(title_prefix, ":\n ", clean_label)
+    
     var_filename <- if (!is.null(filename_prefix)) {
       sub("(\\.[a-zA-Z0-9]+)$", paste0("_", var, "\\1"), filename_prefix)
     } else {
@@ -325,10 +338,16 @@ plot_cand_single <- function(data, liwc_vars, title_prefix = "LIWC",
         title = var_title,
         caption = paste0(
           "Dashed line = corpus mean across all R & D songs.\n",
-          "* FDR p<.05  ** FDR p<.01  *** FDR p<.001 (Welch t, campaign vs rest of ",
+          "False Discovery Rate (FDR), * FDR p<.05  ** FDR p<.01  *** FDR p<.001 \n (Welch t, campaign vs rest of ",
           "corpus; Benjamini-Hochberg adjusted)")
-      ) +
-      theme(panel.grid.major.y = element_blank())
+      ) + scale_x_discrete(expand = expansion(add = 0.6)) + 
+      
+      # 2. KEEP CONTINUOUS Y-AXIS EXPANSION
+      scale_y_continuous(expand = expansion(mult = c(0.15, 0.25))) +
+      theme(panel.grid.major.y = element_blank(), legend.position = "bottom", axis.text.y = element_text(
+        size = 14,  hjust = 1, 
+        vjust = 0.5,   margin = margin(r = 2))   
+      )
     if (!is.null(var_filename)) {
       ggsave(path = "img/", filename = var_filename, plot = p, width = w, height = h, dpi = 300)
     }
@@ -336,4 +355,190 @@ plot_cand_single <- function(data, liwc_vars, title_prefix = "LIWC",
     print(p)
   }
   invisible(plots)
+}
+
+##### party calcs to nice table:
+summary_party_table <- function(data, liwc_vars, 
+                                unit = c("song", "campaign", "candidate"),
+                                conf = 0.95, 
+                                var.equal = FALSE,
+                                var_labels = NULL) {
+  
+  unit <- match.arg(unit)
+  
+  # Safe lookup for global var_labels if not passed directly
+  if (is.null(var_labels)) {
+    var_labels <- get0("var_labels", envir = .GlobalEnv)
+  }
+  
+  # 1. Get party-level aggregated statistics (including n_eff CIs and SEs)
+  means <- liwc_by_party(data, liwc_vars, conf = conf, unit = unit)
+  
+  # 2. Get Welch t-test results comparing R vs D
+  tests <- liwc_party_test(data, liwc_vars, unit = unit, var.equal = var.equal)
+  
+  # 3. Pivot party means to wide format (1 row per LIWC variable)
+  means_wide <- means |>
+    mutate(
+      party_prefix = case_when(
+        party == "D" ~ "dem",
+        party == "R" ~ "rep",
+        TRUE ~ tolower(party)
+      )
+    ) |>
+    pivot_wider(
+      id_cols = liwc,
+      names_from = party_prefix,
+      names_glue = "{party_prefix}_{.value}",
+      values_from = c(n_songs, n_camps, n_cands, n_unit, n_eff, mean, sd, se, lo, hi)
+    )
+  
+  # 4. Join wide means with test statistics and add readable labels
+  tbl <- means_wide |>
+    left_join(tests, by = "liwc") |>
+    mutate(
+      variable_lab = if (!is.null(var_labels)) {
+        coalesce(var_labels[liwc], liwc)
+      } else {
+        liwc
+      },
+      unit_type = unit
+    ) |>
+    select(
+      variable     = liwc,
+      variable_lab,
+      unit_type,
+      # Democratic stats
+      dem_songs    = dem_n_songs,
+      dem_camps    = dem_n_camps,
+      dem_cands    = dem_n_cands,
+      dem_n_eff    = dem_n_eff,
+      dem_mean     = dem_mean,
+      dem_sd       = dem_sd,
+      dem_se       = dem_se,
+      dem_ci_lo    = dem_lo,
+      dem_ci_hi    = dem_hi,
+      # Republican stats
+      rep_songs    = rep_n_songs,
+      rep_camps    = rep_n_camps,
+      rep_cands    = rep_n_cands,
+      rep_n_eff    = rep_n_eff,
+      rep_mean     = rep_mean,
+      rep_sd       = rep_sd,
+      rep_se       = rep_se,
+      rep_ci_lo    = rep_lo,
+      rep_ci_hi    = rep_hi,
+      # Comparative test results (R minus D)
+      diff_rep_dem = diff,
+      cohen_d,
+      t_stat       = t,
+      df,
+      p_raw        = p,
+      sig_raw      = sig,
+      p_adj,
+      sig_adj
+    ) |>
+    arrange(variable)
+  
+  return(tbl)
+}
+
+##### export these to a nice table:
+summary_cand_table <- function(data, liwc_vars, conf = 0.95, var_labels = NULL) {
+  # Safe lookup for global var_labels if not passed directly
+  if (is.null(var_labels)) {
+    var_labels <- get0("var_labels", envir = .GlobalEnv)
+  }
+  
+  # Calculate statistics via your existing liwc_by_cand helper
+  res <- liwc_by_cand(data, liwc_vars, conf = conf)
+  
+  # Format table output
+  tbl <- res |>
+    mutate(
+      var_label = if (!is.null(var_labels)) {
+        coalesce(var_labels[liwc], liwc)
+      } else {
+        liwc
+      }
+    ) |>
+    select(
+      variable     = liwc,
+      variable_lab = var_label,
+      cand_year,
+      cand_full,
+      party,
+      n_songs,
+      cand_mean    = mean,
+      cand_sd      = sd,
+      cand_se      = se,
+      cand_ci_lo   = lo,
+      cand_ci_hi   = hi,
+      corpus_mean  = ref,
+      overall_mean = ref_all,
+      diff,
+      t_stat       = t,
+      df,
+      p_raw        = p,
+      sig_raw      = sig,
+      p_adj,
+      sig_adj
+    ) |>
+    arrange(variable, desc(cand_mean))
+  
+  return(tbl)
+}
+
+export_cand_tables_by_var <- function(df, var_labels = NULL, output_dir = "img") {
+  if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+  
+  # Safe lookup for global var_labels if not passed directly
+  if (is.null(var_labels)) {
+    var_labels <- get0("var_labels", envir = .GlobalEnv)
+  }
+  
+  unique_vars <- unique(df$variable)
+  tex_files <- c()
+  
+  for (v in unique_vars) {
+    # Extract clean variable label safely
+    var_lab <- if (!is.null(var_labels) && v %in% names(var_labels)) {
+      var_labels[[v]]
+    } else {
+      v
+    }
+    
+    file_path <- file.path(output_dir, paste0("cand_table_", v, ".tex"))
+    
+    # Subset & format cleanly without null-coalesce errors
+    sub_df <- df |> 
+      filter(variable == v) |> 
+      select(cand_year, cand_mean, corpus_mean, diff, p_adj, sig_adj)
+    
+    # Create xtable
+    xt <- xtable(
+      sub_df,
+      caption = paste0("Candidate-level results for ", var_lab, " (", v, ")"),
+      label = paste0("tab:cand_", v),
+      align = c("l", "l", "r", "r", "r", "r", "c")
+    )
+    
+    # Print to LaTeX file
+    print(
+      xt,
+      file = file_path,
+      type = "latex",
+      include.rownames = FALSE,
+      floating = FALSE,
+      table.placement = "htbp"
+    )
+    
+    tex_files <- c(tex_files, file_path)
+  }
+  
+  # Generate master LaTeX file that inputs all created tables
+  master_content <- paste0("\\input{", tex_files, "}", collapse = "\n\\clearpage\n")
+  writeLines(master_content, file.path(output_dir, "all_cand_tables.tex"))
+  
+  message("Exported ", length(unique_vars), " variable tables to ", output_dir)
 }
