@@ -15,6 +15,10 @@ party_colors <- c("D" = "#2a5d9c", "R" = "#a83232")
 front <- c("Clinton 2016", "Biden 2020", "Harris 2024",
            "Trump 2016", "Trump 2020", "Trump 2024")
 
+## p-values for LaTeX tables: "< .001" instead of 0.000 (xtable escapes the <)
+fmt_p <- function(p) ifelse(p < .001, "< 0.001", sprintf("%.3f", p))
+
+
 # Significance star helper
 star <- function(p) {
   case_when(
@@ -55,19 +59,19 @@ liwc_units <- function(long, unit) {
 # One-way random-effects ICC, design effect, and effective n per measure
 liwc_icc <- function(data, liwc_vars, group = "cand_year") {
   liwc_long(data, liwc_vars) |>
-    group_by(liwc) |>
-    group_modify(function(d, k) {
-      d[[group]] <- factor(d[[group]])
-      ni <- as.numeric(table(d[[group]])); ni <- ni[ni > 0]
-      if (length(ni) < 2 || sum(ni) <= length(ni)) {
+    group_by(liwc) |> # group by each variable
+    group_modify(function(d, k) { #function takes two inputs, d and k
+      d[[group]] <- factor(d[[group]]) # group by cand_year
+      ni <- as.numeric(table(d[[group]])); ni <- ni[ni > 0] #groups into table and count the number of groups
+      if (length(ni) < 2 || sum(ni) <= length(ni)) { #get non-NA size of groups -- if NA, can't do calcs
         return(tibble(n_songs = sum(ni), n_groups = length(ni),
                       icc = NA_real_, design_effect = NA_real_, n_eff = NA_real_))
       }
-      a   <- summary(aov(reformulate(group, "value"), data = d))[[1]]
-      msb <- a[["Mean Sq"]][1]; msw <- a[["Mean Sq"]][2]
-      k0  <- (sum(ni) - sum(ni^2) / sum(ni)) / (length(ni) - 1)
-      icc <- max(0, (msb - msw) / (msb + (k0 - 1) * msw))
-      deff <- 1 + (k0 - 1) * icc
+      a   <- summary(aov(reformulate(group, "value"), data = d))[[1]] #anova summary
+      msb <- a[["Mean Sq"]][1]; msw <- a[["Mean Sq"]][2] #pull out relevant variables
+      k0  <- (sum(ni) - sum(ni^2) / sum(ni)) / (length(ni) - 1) # avg group size (correction factor)
+      icc <- max(0, (msb - msw) / (msb + (k0 - 1) * msw)) #calc icc as max of 0 and effective difference
+      deff <- 1 + (k0 - 1) * icc #effect difference (how much var is inflated by clustering of obs bc of groups)
       tibble(n_songs = sum(ni), n_groups = length(ni),
              icc = icc, design_effect = deff, n_eff = sum(ni) / deff)
     }) |>
@@ -76,7 +80,7 @@ liwc_icc <- function(data, liwc_vars, group = "cand_year") {
 
 # Aggregated party-level means and CIs (UPDATED WITH OPTION 1: n_eff Design Effect Adjustments)
 liwc_by_party <- function(data, liwc_vars, conf = 0.95,
-                          unit = c("song", "campaign", "candidate")) {
+                          unit = c("campaign", "candidate", "song")) {
   unit <- match.arg(unit)
   long <- liwc_long(data, liwc_vars)
   
@@ -85,12 +89,13 @@ liwc_by_party <- function(data, liwc_vars, conf = 0.95,
     group_by(liwc) |>
     summarise(has_neg = any(value < 0, na.rm = TRUE), .groups = "drop")
   
-  # Calculate ICC and design effects when running song-level units
-  icc_stats <- if (unit == "song") {
-    liwc_icc(data, liwc_vars, group = "cand_year") |>
-      select(liwc, design_effect)
+  # Calculate ICC and design effects when running various-level units
+  icc_stats <- if (unit == "song") { #song as unit 
+    map_dfr(split(data, data$party), ~ liwc_icc(.x, liwc_vars, group = "cand_year"),
+            .id = "party") |>
+      select(party, liwc, design_effect)
   } else {
-    tibble(liwc = liwc_vars, design_effect = 1)
+    tidyr::expand_grid(party = unique(data$party), liwc = liwc_vars, design_effect = 1)
   }
   
   liwc_units(long, unit) |>
@@ -105,13 +110,11 @@ liwc_by_party <- function(data, liwc_vars, conf = 0.95,
       .groups = "drop"
     ) |>
     left_join(neg_flag, by = "liwc") |>
-    left_join(icc_stats, by = "liwc") |>
+    left_join(icc_stats, by = c("party", "liwc"))|>
     mutate(
-      # Adjust effective sample size (n_eff) using Design Effect if unit == "song"
-      n_eff = if_else(unit == "song" & !is.na(design_effect) & design_effect > 0, 
-                      n_unit / design_effect, 
-                      as.numeric(n_unit)),
-      
+      # Adjust effective sample size (n_eff) using Design Effect if unit == "campaign"
+      n_eff = if_else(!is.na(design_effect) & design_effect > 0, 
+                      n_unit / design_effect, as.numeric(n_unit)),
       # Standard Error adjusted for effective N
       se    = if_else(n_eff > 1, sd / sqrt(n_eff), NA_real_),
       
@@ -126,9 +129,12 @@ liwc_by_party <- function(data, liwc_vars, conf = 0.95,
 }
 
 # Party difference hypothesis tests (Welch t-test)
+# Party difference tests.
+#   unit = "campaign"/"candidate": Welch t on aggregated means
+#   unit = "song": OLS on songs with CR2 cluster-robust SEs by campaign, Satterthwaite df
 liwc_party_test <- function(data, liwc_vars,
-                            unit = c("song", "campaign", "candidate"),
-                            var.equal = FALSE) {
+                            unit = c("campaign", "candidate", "song"),
+                            var.equal = FALSE, cluster = "cand_year") {
   unit <- match.arg(unit)
   long <- liwc_long(data, liwc_vars)
   liwc_units(long, unit) |>
@@ -136,25 +142,43 @@ liwc_party_test <- function(data, liwc_vars,
     group_modify(function(d, k) {
       R <- d$value[d$party == "R"]; D <- d$value[d$party == "D"]
       nR <- length(R); nD <- length(D)
-      if (nR < 2 || nD < 2) {
-        return(tibble(n_R = nR, n_D = nD, mean_R = mean(R), mean_D = mean(D),
-                      diff = mean(R) - mean(D), cohen_d = NA_real_,
-                      t = NA_real_, df = NA_real_, p = NA_real_, sig = ""))
-      }
-      tt <- t.test(R, D, var.equal = var.equal)
+      gR <- n_distinct(d[[cluster]][d$party == "R"])
+      gD <- n_distinct(d[[cluster]][d$party == "D"])
+      out <- tibble(n_R = nR, n_D = nD, clus_R = gR, clus_D = gD,
+                    mean_R = mean(R), mean_D = mean(D), diff = mean(R) - mean(D),
+                    cohen_d = NA_real_, se = NA_real_, t = NA_real_,
+                    df = NA_real_, p = NA_real_, method = NA_character_)
+      if (nR < 2 || nD < 2) return(out)
       pooled <- sqrt(((nR - 1) * var(R) + (nD - 1) * var(D)) / (nR + nD - 2))
-      tibble(n_R = nR, nD = nD,
-             mean_R = mean(R), mean_D = mean(D),
-             diff = mean(R) - mean(D),
-             cohen_d = (mean(R) - mean(D)) / pooled,
-             t = unname(tt$statistic), df = unname(tt$parameter),
-             p = tt$p.value, sig = star(tt$p.value))
+      out$cohen_d <- out$diff / pooled
+      
+      if (unit == "song") {
+        if (gR < 2 || gD < 2) return(out)
+        d$party <- factor(d$party, levels = c("D", "R"))   # coef = R minus D
+        fit <- lm(value ~ party, data = d)
+        ct  <- as.data.frame(coef_test(fit, vcov = "CR2", cluster = d[[cluster]],
+                                       test = "Satterthwaite"))
+        row <- ct[ct$Coef == "partyR", ]
+        out$se <- row$SE
+        out$t  <- row$tstat
+        out$df <- row[[grep("^df", names(ct), value = TRUE)[1]]]
+        out$p  <- row[[grep("^p",  names(ct), value = TRUE)[1]]]
+        out$method <- "OLS + CR2 cluster-robust (by campaign), Satterthwaite df"
+      } else {
+        tt <- t.test(R, D, var.equal = var.equal)
+        out$se <- unname(tt$stderr)
+        out$t  <- unname(tt$statistic)
+        out$df <- unname(tt$parameter)
+        out$p  <- tt$p.value
+        out$method <- if (var.equal) "Student t" else "Welch t"
+      }
+      out
     }) |>
     ungroup() |>
-    mutate(p_adj = p.adjust(p, method = "BH"), sig_adj = star(p_adj))
+    mutate(sig = star(p), p_adj = p.adjust(p, method = "BH"), sig_adj = star(p_adj))
 }
 
-# Candidate vs rest-of-corpus, two-sample Welch, BH-adjusted within measure
+# Campaign (cand) vs rest-of-corpus, two-sample Welch, BH-adjusted within measure
 liwc_by_cand <- function(data, liwc_vars, conf = 0.95) {
   long <- liwc_long(data, liwc_vars)
   long |>
@@ -205,9 +229,9 @@ liwc_by_cand <- function(data, liwc_vars, conf = 0.95) {
 
 # Plot party comparisons with in-bar estimates and SEs
 plot_party <- function(data, liwc_vars,
-                       unit = c("song", "campaign", "candidate"),
-                       title = "LIWC by party", filename = NULL,
-                       use_adj = TRUE, var_labels = NULL, w = 9, h = 6) {
+                       unit = c("campaign", "candidate"),
+                       title = "LIWC by party", subtitle = NULL, filename = NULL,
+                       use_adj = TRUE, var_labels = NULL, w = 8, h = 7) {
   
   # Safe lookup for global var_labels if not passed directly
   if (is.null(var_labels)) {
@@ -258,7 +282,7 @@ plot_party <- function(data, liwc_vars,
     geom_text(
       aes(y = label_y, label = bar_label),
       colour = "white",
-      size = 3.5,
+      size = 4,
       fontface = "bold",
       lineheight = 0.85,
       vjust = 0.5
@@ -269,12 +293,12 @@ plot_party <- function(data, liwc_vars,
                labeller = labeller(liwc = if (!is.null(var_labels)) var_labels else identity)) +
     scale_fill_manual(values = party_colors, guide = "none") +
     scale_y_continuous(expand = expansion(mult = if (neg) c(0.15, 0.22) else c(0, 0.22))) +
-    labs(x = NULL, y = "Mean % of words per song", title = title,
+    labs(x = NULL, y = "Mean % of words per song", title = title, subtitle = subtitle,
          caption = paste0(
            bar_txt, "\n",
            "* p<.05  ** p<.01  *** p<.001 (Welch t, R vs D across ", test_txt,
            if (use_adj) "; BH-adjusted)" else ")")) +
-    theme(panel.grid.major.x = element_blank())
+    theme(panel.grid.major.x = element_blank(), plot.caption = element_text(size = 8))
   
   if (!is.null(filename)) {
     ggsave(path = "img/", filename = filename, plot = p, width = w, height = h, dpi = 300)
@@ -284,7 +308,7 @@ plot_party <- function(data, liwc_vars,
 }
 
 # Plot individual campaigns against the corpus mean, BH-adjusted stars
-plot_cand_single <- function(data, liwc_vars, title_prefix = "LIWC",
+plot_cand_single <- function(data, liwc_vars, title_prefix = "LIWC", subtitle = NULL,
                              filename_prefix = NULL, only_front = TRUE,
                              var_labels = NULL, w = 7, h = 5) {
   
@@ -331,11 +355,11 @@ plot_cand_single <- function(data, liwc_vars, title_prefix = "LIWC",
                  color = "grey40", linewidth = 0.8) +
       coord_flip() +
       scale_fill_manual(values = party_colors, name = "Party") +
-      scale_y_continuous(expand = expansion(mult = c(0.25, 0.25))) +
       labs(
         x = NULL,
         y = "Mean % of words per song",
         title = var_title,
+        subtitle = subtitle,
         caption = paste0(
           "Dashed line = corpus mean across all R & D songs.\n",
           "False Discovery Rate (FDR), * FDR p<.05  ** FDR p<.01  *** FDR p<.001 \n (Welch t, campaign vs rest of ",
@@ -359,7 +383,7 @@ plot_cand_single <- function(data, liwc_vars, title_prefix = "LIWC",
 
 ##### party calcs to nice table:
 summary_party_table <- function(data, liwc_vars, 
-                                unit = c("song", "campaign", "candidate"),
+                                unit = c("campaign", "candidate"),
                                 conf = 0.95, 
                                 var.equal = FALSE,
                                 var_labels = NULL) {

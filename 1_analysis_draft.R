@@ -20,15 +20,19 @@ library(glmnet)
 library(dplyr)
 library(ggplot2)
 library(labelled)
+library(clubSandwich)
+library(lmerTest)
 
 # seed for simulations
 set.seed(1389)
+
+fmt_p <- function(p) ifelse(p < .001, "< 0.001", sprintf("%.3f", p))
 
 # load data
 cand_songs <- read_csv("data/cand_songs_bycampaign.csv") |> 
   mutate(cand_year = fct_reorder(cand_year, year)) |>
   mutate(across(starts_with("NRC_"), ~ 100 * .x / WC), #deal with NRC wordcount issues for scaling
-         i_less_we = i-we, fem_male = female-male)  
+         i_minus_we = i-we, fem_male = female-male)  
 
 #### label prep #####
 front = c( "Clinton 2016", "Biden 2020",
@@ -66,7 +70,7 @@ var_labels <- c(
   "NRC_trust"    = "Trust (NRC)",
   "NRC_joy"      = "Joy (NRC)",
   "avg_dominance"= "Avg Dominance",
-  "i_less_we"    = "I use less We use",
+  "i_minus_we"    = "I use less We use",
   "fem_male"     = "Female refs less Male refs"
 )
 
@@ -102,7 +106,7 @@ bind_rows(summary_table, relocate(summary_row, campaign)) |>
 summary_table <- cand_songs |> group_by(cand_year) |> summary_block()
 summary_row   <- cand_songs |> summary_block() |> mutate(cand_year = "Total (distinct)")
 
-bind_rows(summary_table, relocate(summary_row, cand_year)) |>
+bind_rows(summary_table, relocate(summary_row, cand_year)) |>  select(-`Distinct Candidates`) |>
   xtable(digits = 0) |>
   print(file = "img/summary_camp_cy.tex", type = "latex", include.rownames = FALSE, floating = FALSE)
 
@@ -112,7 +116,7 @@ bind_rows(summary_table, relocate(summary_row, cand_year)) |>
 # 1. Gather all LIWC and NRC variables referenced in analysis
 liwc_nrc_vars <- c( "relig", "politic", "focuspast", "focuspresent",
     "focusfuture", "Drives", "affiliation", "Authentic", "Clout", "male", "female",
-    "conflict", "NRC_trust", "NRC_joy", "avg_dominance", "i_less_we", "fem_male")
+    "conflict", "NRC_trust", "NRC_joy", "avg_dominance", "i_minus_we", "fem_male")
 
 
 # 2. Extract stats using psych::describe() and select relevant columns
@@ -142,6 +146,7 @@ gp <- cand_songs |>
 
 tab <- table(gp$genre, gp$party)
 cs  <- chisq.test(tab)
+cs$expected
 
 lean <- as.data.frame.table(cs$stdres, responseName = "stdres") |>
   rename(genre = Var1, party = Var2) |>
@@ -198,12 +203,12 @@ ggsave("genre_party_lean.png", path = "img/", width = 7, height = 5.5, dpi = 300
 ## CALLS
 ## 
 ## H1a: individual vs collective
-plot_party(cand_songs, "i_less_we", title = "Individual vs collective language, by party", filename = "liwc_party_iwe.png")
-plot_cand_single(cand_songs, "i_less_we", title_prefix = "Individual vs collective language, by campaign", filename_prefix = "liwc_cand_iwe.png")
-plot_cand_single(cand_songs, "i_less_we", only_front = TRUE, title_prefix = "Individual vs collective language (Front Runners)", filename_prefix = "liwc_cand_iwe_fr.png")
+plot_party(cand_songs, "i_minus_we", title = "Individual vs collective language, by party", filename = "liwc_party_iwe.png")
+plot_cand_single(cand_songs, "i_minus_we", title_prefix = "Individual vs collective language, by campaign", filename_prefix = "liwc_cand_iwe.png")
+plot_cand_single(cand_songs, "i_minus_we", only_front = TRUE, title_prefix = "Individual vs collective language (Front Runners)", filename_prefix = "liwc_cand_iwe_fr.png")
 
 ## H1a: religion
-plot_party(cand_songs, c("relig"), title = "Religious & political references, by party", filename = "liwc_party_relig.png", w = 5)
+plot_party(cand_songs, c("relig"), title = "Religious & political references, by party", filename = "liwc_party_relig.png", w = 7)
 plot_party(cand_songs, c("politic"), title = "Religious & political references, by party", filename = "liwc_party_politic.png", w = 5)
 plot_cand_single(cand_songs, c("relig", "politic"), title_prefix = "Religious & political references, by campaign", filename_prefix = "liwc_cand_relig.png", w = 6)
 
@@ -217,28 +222,122 @@ plot_cand_single(cand_songs, c("focuspast", "focuspresent", "focusfuture"), titl
 
 
 ## Cand-specific hypotheses
+# this section tests hypotheses at the party-level and candidate level
+# candidate name refers to the hypothesis related to that candidate
 
 # 2a: Clinton: Affiliation, Drives
 plot_party(cand_songs, c("affiliation", "Drives"), title = "Clinton: Care and Wonk outcomes, by party", filename = "liwc_party_clinton.png")
 plot_cand_single(cand_songs, c("affiliation", "Drives"), title_prefix = "Clinton: Care and Wonk outcomes, by campaign", filename_prefix = "liwc_cand_clinton.png")
 
 # 2b: Biden: trust, Authentic
-plot_party(cand_songs, c("NRC_trust", "Authentic"), title = "Biden: Trust and Authenticity, by party", filename = "liwc_party_biden.png")
-plot_cand_single(cand_songs, c("NRC_trust", "Authentic"), title_prefix = "Biden: Trust and Authenticity, by campaign", filename_prefix = "liwc_cand_biden.png")
+plot_party(cand_songs, c("NRC_trust", "Authentic"), 
+           title = "Biden: Trust and Authenticity, by party", filename = "liwc_party_biden.png")
+plot_cand_single(cand_songs, c("NRC_trust", "Authentic"), 
+                 title_prefix = "Biden: Trust and Authenticity, by campaign", filename_prefix = "liwc_cand_biden.png")
 
-# 3: Trump: fem\_male and Clout
-plot_party(cand_songs, c("fem_male", "avg_dominance"), title = "Trump: Gender pronoun and Clout, by party", filename = "liwc_party_trump.png")
-plot_cand_single(cand_songs, c("fem_male", "avg_dominance"), title_prefix = "Trump: Gender pronoun and Clout, by campaign", filename_prefix = "liwc_cand_trump.png")
+# 3: Trump: fem\_male and I/we
+plot_party( cand_songs, c("fem_male", "male"), title = "Trump: Gender references, by party",  filename = "liwc_party_trump.png")
+plot_cand_single(cand_songs, c("fem_male", "male"), title_prefix = "Trump: Gender references, by party", filename_prefix = "liwc_cand_trump.png")
+
+# Trump dominance
+party_dom_df <- liwc_by_party(cand_songs, "avg_dominance", unit = "campaign")
+party_dom_tst <- liwc_party_test(cand_songs, "avg_dominance", unit = "campaign")
+
+# 2. Format labels and significance annotations
+party_dom_df <- party_dom_df |>
+  mutate(bar_label = sprintf("%.3f\n(%.2f)", mean, se), label_y = mean * 0.25)
+
+ann_party <- party_dom_df |> group_by(liwc) |>
+  summarise(top = max(hi, na.rm = TRUE),
+            span = diff(range(c(lo, hi), na.rm = TRUE)),
+            .groups = "drop") |>
+  mutate(y = top + 0.10 * if_else(is.finite(span) & span > 0, span, abs(top))) |>
+  left_join(party_dom_tst, by = "liwc") |>
+  filter(!is.na(sig_adj), sig_adj != "") |>
+  mutate(x = 1.5)
+
+# 3. Build ggplot
+p_party_dom <- ggplot(party_dom_df, aes(x = x_lab, y = mean, fill = party)) +
+  geom_col(width = 0.7, colour = NA) +
+  geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.18, linewidth = 0.9, colour = "grey40") +
+  geom_text(
+    aes(y = label_y, label = bar_label),
+    colour = "white", size = 4, fontface = "bold", lineheight = 0.85, vjust = 0.5) +
+  geom_text(data = ann_party, aes(x = x, y = y, label = sig_adj),
+            inherit.aes = FALSE, size = 8, vjust = 0) +
+  scale_fill_manual(values = party_colors, guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.22))) +
+  labs(x = NULL,
+    y = "Mean Dominance Score (Normalized)",
+    title = "Trump: Dominance by party",
+    caption = paste0(
+      "Bars are party means across all songs (SEs adjusted via n_eff); whiskers 95% CI.\n",
+      "* p<.05  ** p<.01  *** p<.001 (Welch t, R vs D across songs; BH-adjusted)")) +
+  theme(panel.grid.major.x = element_blank(), plot.caption = element_text(size = 8))
+ggsave("img/liwc_party_trump_dominance.png", plot = p_party_dom, width = 8, height = 7, dpi = 300)
+
+# 1. Compute candidate summary statistics
+cand_dom_df <- liwc_by_cand(cand_songs, "avg_dominance") |> filter(cand_year %in% front)
+
+overall_mean_dom <- cand_dom_df$ref_all[1]
+clean_label_dom  <- if (exists("var_labels") && "avg_dominance" %in% names(var_labels)) var_labels[["avg_dominance"]] else "avg_dominance"
+
+# 2. Add significance star positions directly without external range calculation
+cand_dom_df <- cand_dom_df |>
+  mutate(
+    pad = max(abs(c(lo, hi, mean)), na.rm = TRUE) * 0.08,
+    star_x = if_else(mean >= 0,
+                     pmax(hi, mean, 0, na.rm = TRUE) + pad,
+                     pmin(lo, mean, 0, na.rm = TRUE) - pad),
+    star_hjust = if_else(mean >= 0, 0, 1) )
+
+# 3. Build ggplot
+p_cand_dom <- ggplot(cand_dom_df, aes(x = reorder(cand_year, mean), y = mean, fill = party)) +
+  geom_hline(yintercept = 0, color = "grey50", linewidth = 0.6) +
+  geom_col(width = 0.75, colour = NA) +
+  geom_errorbar(aes(ymin = pmin(lo, hi), ymax = pmax(lo, hi)),
+                width = 0.2, linewidth = 0.8, colour = "grey40") +
+  geom_text(aes(y = star_x, label = sig_adj, hjust = star_hjust),
+            vjust = 0.75, size = 6) +
+  geom_hline(yintercept = overall_mean_dom, linetype = "dashed",
+             color = "grey40", linewidth = 0.8) +
+  coord_flip() +
+  scale_fill_manual(values = party_colors, name = "Party") +
+  scale_x_discrete(expand = expansion(add = 0.6)) +
+  scale_y_continuous(expand = expansion(mult = c(0.15, 0.25))) +
+  labs(
+    x = NULL,
+    y = "Mean Dominance Score (Normalized)",
+    title = paste0("Trump: Dominance, by campaign:\n ", clean_label_dom),
+    caption = paste0(
+      "Dashed line = corpus mean across all R & D songs.\n",
+      "False Discovery Rate (FDR), * FDR p<.05  ** FDR p<.01  *** FDR p<.001 \n ",
+      "(Welch t, campaign vs rest of corpus; Benjamini-Hochberg adjusted)")) +
+  theme(panel.grid.major.y = element_blank(),
+    legend.position = "bottom",
+    axis.text.y = element_text(size = 14, hjust = 1, vjust = 0.5, margin = margin(r = 2)))
+
+# Save
+ggsave("img/liwc_cand_trump_dominance.png", plot = p_cand_dom, width = 7, height = 5, dpi = 300)
 
 ## export all these to a table (party then cand):
 # Generate the summary table (default unit = "song")
 party_stats_df <- summary_party_table(cand_songs, liwc_nrc_vars)
 
 # Quick preview of key comparative columns
-party_stats_df |> 
-  select(variable, dem_mean, rep_mean, diff_rep_dem, cohen_d, p_adj, sig_adj) |>
-  mutate(variable = coalesce(var_labels[variable], variable)) |>
-  xtable() |> print("img/tests_table_party.tex", type = "latex", include.rownames = FALSE, floating = FALSE )
+party_stats_df |>
+  transmute(Variable      = coalesce(var_labels[variable], variable),
+            `D mean`      = dem_mean,
+            `R mean`      = rep_mean,
+            `R $-$ D`     = diff_rep_dem,
+            `Cohen's $d$` = cohen_d,
+            `Adj. $p$`    = fmt_p(p_adj),
+            ` `           = sig_adj) |>
+  xtable(digits = c(0, 0, 2, 2, 2, 2, 0, 0),
+         align  = c("l", "l", "r", "r", "r", "r", "r", "l")) |>
+  print(file = "img/tests_table_party.tex", type = "latex",
+        include.rownames = FALSE, floating = FALSE,
+        sanitize.colnames.function = identity)
 
 # Generate the summary data frame CANDS
 # Compute summary statistics
@@ -250,24 +349,24 @@ export_cand_tables_by_var(cand_stats_df, var_labels)
 # 3. Export single combined master file (img/tests_table.tex)
 cand_stats_df |> 
   mutate(
-    variable_lab = if (!is.null(var_labels)) coalesce(var_labels[variable], variable) else variable
-  ) |> 
+    variable_lab = if (!is.null(var_labels)) coalesce(var_labels[variable], variable) else variable,
+    p_adj = fmt_p(p_adj)) |> 
   select(variable_lab, cand_year, cand_mean, corpus_mean, diff, p_adj, sig_adj) |> 
-  xtable(
-    caption = "Candidate-level statistical test results",
-    label = "tab:cand_tests"
-  ) |> 
-  print(
-    file = "img/tests_table.tex", 
-    type = "latex", 
-    include.rownames = FALSE, floating = FALSE
-  )
+  xtable(caption = "Candidate-level statistical test results", label = "tab:cand_tests") |> 
+  print(file = "img/tests_table.tex", type = "latex", include.rownames = FALSE, floating = FALSE)
+
+# in 1_analysis.R, give the Clout calls their own files and titles
+plot_party(cand_songs, "Clout", title = "Trump: Clout, by party",
+           filename = "liwc_party_trump_clout.png")
+
+plot_cand_single(cand_songs, "Clout", title_prefix = "Trump: Clout, by campaign",
+                 filename_prefix = "liwc_cand_trump_clout.png") 
 
 ###################### METHODS: PCA ##########
-keep_vars <- c( liwc_nrc_vars, "id") 
+keep_vars <- setdiff(c(liwc_nrc_vars, "id"), "fem_male")
 
 num_data <- cand_songs |> 
-  select(where(is.numeric)) |> select(-song_ct) |>
+  select(where(is.numeric)) |> select(-song_ct)  |>
   select(all_of(keep_vars)) |> filter(if_all(all_of(keep_vars), is.finite)) 
 
 nrow(cand_songs) - nrow(num_data) 
@@ -288,16 +387,14 @@ round(pca_res$sdev^2 / sum(pca_res$sdev^2), 3)
 
 
 # prop var explained and variable loadings
-fviz_eig(
-  pca_res, 
-  addlabels = TRUE, 
-  labelsize = 5,          # larger label text
+fviz_eig(pca_res, 
+  addlabels = TRUE, labelsize = 5,          # larger label text
   #linecolor = "white"     # variance line white
  )  
 ggsave(path = "img/", "pca_eig.png", width = 8)
 
-ylabdim <- c("Dim 2: Time, future to joyful, male, trust ")
-xlabdim <- c("Dim 1: Capability and Support to Authentic" )
+ylabdim <- "Dim 2: Forward-looking to Golden Era"
+xlabdim <- "Dim 1: Collective Care to Individual Authenticity"
 
 fviz_pca_var(
   pca_res, 
@@ -320,6 +417,8 @@ num_data |> select(-id) |> describe() |> as.data.frame() |>
 
 
 ## Now: PCA and focus on grouping by candidate. #########
+# PCA was conducted at the song level to characterize the multidimensional structure of song lyrics; 
+# campaign positions were subsequently calculated as campaign-level centroids.
 # now filter for regular analysis: add relevant elements back in
 pca_out <- cand_songs |> 
   select(id, campaign, cand_full, party, genre, title) |>
@@ -346,15 +445,15 @@ cand_avg |>
         title = "Candidate Averages (PCA)") + #facet_grid(vars(party)) +
   scale_color_manual(values = party_colors) +
   scale_fill_manual(values = c(  "R" = "lightpink", "D" = "lightblue" ))  
-ggsave(filename = "img/pca_cand.png",, width = 9, height = 7)
+ggsave(filename = "img/pca_cand.png", width = 9, height = 7)
 
 
 ## PCA BOOTSTRAPPING
 ## 
 ## Are campaign centroids stable, or are they noise at high resolution?
 ## Resample songs WITHIN each campaign, recompute the centroid, repeat.
-## 
-B <- 500
+## hold the PCA solution fixed and bootstrap the campaign centroid
+B <- 2000
 
 pca_out <- pca_out |>  
   mutate(cand_year = paste(word(cand_full, -1), str_extract(campaign, "\\d{4}")))
@@ -420,6 +519,8 @@ party_cent <- dat |>
   summarise(n_camp = n(), c1 = mean(m1), c2 = mean(m2), .groups = "drop")
 
 ## nested bootstrap: campaigns within party, then songs within campaign
+set.seed(8987)
+party_boot
 party_boot <- map_dfr(seq_len(B), function(b) {
   map_dfr(unique(camps$party), function(pp) {
     cs <- sample(camps$cand_year[camps$party == pp], replace = TRUE)
@@ -461,7 +562,7 @@ cap <- paste0(
   "(crossbars: 95% bootstrap CI over songs).\n",
   "Diamonds are party means of campaign means (crossbars: nested bootstrap over ",
   "campaigns and songs).\n",
-  "Candidate accounts for ", pct(ve$eta2[1]), " and ", pct(ve$eta2[2]),
+  "Candidate (campaign-year) accounts for ", pct(ve$eta2[1]), " and ", pct(ve$eta2[2]),
   " of song-level variance in PC1 and PC2 (p = ",
   format.pval(ve$p[1], digits = 2), ", p = ", format.pval(ve$p[2], digits = 2),
   ").")
@@ -485,26 +586,29 @@ ggplot(stab, aes(c1, c2, colour = party)) +
   geom_point(data = party_stab, aes(c1, c2), shape = 18, size = 6) +
   geom_text(data = party_stab, aes(c1, c2, label = lab),
             vjust = -1.4, fontface = "bold", size = 5.5, show.legend = FALSE) +
-  
   scale_colour_manual(values = party_colors, name = "Party") +
   labs(y = ylabdim, x = xlabdim,
        title = "Campaign and party centroids with bootstrap uncertainty",
        caption = cap) + coord_cartesian(ylim = c(-1.1, 1.7), xlim = c(-1.5, 1.55)) +
   theme(plot.caption = element_text(hjust = 0, colour = "grey30", size = 10), legend.position = "bottom")
-
 ggsave(path = "img/", "pca_cand_boot.png", width = 12, height = 10, dpi = 300)
+
+## does the campaign-level t-test agree?
+cm <- pca_out |> group_by(cand_year, party) |>
+  summarise(m = mean(PC1), .groups = "drop")
+t.test(m ~ party, data = cm)
 
 ## does the campaign-level t-test agree?
 cm <- pca_out |> group_by(cand_year, party) |>
   summarise(m = mean(PC2), .groups = "drop")
 t.test(m ~ party, data = cm)
 
+
 stab |>
 print(file = "img/summary_pca_stab.tex", type = "latex",  include.rownames = FALSE, floating = FALSE )
 
 
 # ####### testing PCA vs genre
-library(lmerTest)
 stab <- stab |>
   mutate(cand = sub("\\d{4}$", "", cand_year))
 
@@ -514,8 +618,8 @@ summary(lmer(c2 ~ party + (1 | cand), data = stab))
 # song level, genre controlled (lump rare genres so the model is estimable)
 song_g <- dat |> mutate(genre = fct_lump_min(factor(genre), min = 10))
 
-m_base  <- lmer(PC2 ~ party         + (1 | cand_year), data = song_g)
-m_genre <- lmer(PC2 ~ party + genre + (1 | cand_year), data = song_g)
+m_base  <- lmer(PC2 ~ party         + (1 | cand_year), data = song_g, REML = FALSE)
+m_genre <- lmer(PC2 ~ party + genre + (1 | cand_year), data = song_g, REML = FALSE)
 
 summary(m_base)
 summary(m_genre)
@@ -562,7 +666,8 @@ genre_table <- full_join(
   )
 
 genre_table |>
-  xtable(digits = c(0, 0, 3, 3, 3, 3, 3, 3)) |>
+  mutate(across(starts_with("p ("), fmt_p)) |>
+  xtable(digits = c(0, 0, 3, 3, 0, 3, 3, 0)) |>
   print(file = "img/summary_pca_genre.tex", type = "latex",
         include.rownames = FALSE, floating = FALSE)
 
@@ -573,10 +678,10 @@ comp_tbl <- anova(m_base, m_genre) |>
   select(Model, npar, AIC, BIC, Chisq, Df, p = `Pr(>Chisq)`)
 
 comp_tbl |>
-  xtable(digits = c(0, 0, 0, 1, 1, 2, 0, 3)) |>
+  mutate(p = fmt_p(p)) |>
+  xtable(digits = c(0, 0, 0, 1, 1, 2, 0, 0)) |>
   print(file = "img/summary_pca_genre_lrt.tex", type = "latex",
         include.rownames = FALSE, floating = FALSE)
-
 
 
 # ## leave one campaign out
